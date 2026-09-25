@@ -232,4 +232,31 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
+export async function DELETE(request: NextRequest) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  }
+
+  try {
+    const supabase = getSupabaseAdmin();
+    const { error: deleteError } = await supabase
+      .from("products")
+      .delete()
+      .not("id", "is", null);
+
+    if (deleteError) throw deleteError;
+
+    const { error: auctionError } = await supabase
+      .from("auction")
+      .upsert({ id: 1, current_lot: 1, status: "stopped" }, { onConflict: "id" });
+
+    if (auctionError) throw auctionError;
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Could not delete all products:", error);
+    return NextResponse.json({ error: "Could not delete all products." }, { status: 500 });
+  }
+}
+
 export type { ProductRow };

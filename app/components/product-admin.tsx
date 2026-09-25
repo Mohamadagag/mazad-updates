@@ -358,6 +358,11 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingOrder, setSavingOrder] = useState(false);
+  const [productToDelete, setProductToDelete] = useState<AdminProduct | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
+  const [deleteAllError, setDeleteAllError] = useState("");
   const [editorError, setEditorError] = useState("");
   const [pageError, setPageError] = useState("");
   const [notice, setNotice] = useState("");
@@ -470,12 +475,10 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
     }
   }
 
-  async function deleteProduct(product: AdminProduct) {
-    const confirmed = window.confirm(
-      `Delete “${product.name}”? The remaining lots will be renumbered.`
-    );
-    if (!confirmed) return;
-
+  async function deleteProduct() {
+    if (!productToDelete || deleting) return;
+    const product = productToDelete;
+    setDeleting(true);
     setPageError("");
     setNotice("");
     try {
@@ -483,10 +486,35 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
         method: "DELETE",
       });
       if (!response.ok) throw new Error(await responseError(response));
+      setProductToDelete(null);
       setNotice(`“${product.name}” was deleted. Remaining lots were renumbered.`);
       await loadProducts();
     } catch (error) {
       setPageError(error instanceof Error ? error.message : "Could not delete product.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function deleteAllProducts() {
+    if (deletingAll || products.length === 0) return;
+    setDeletingAll(true);
+    setDeleteAllError("");
+    setPageError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/admin/products", { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseError(response));
+
+      setConfirmDeleteAll(false);
+      setProducts([]);
+      setNotice("All products were deleted. The auction has been stopped.");
+      await loadProducts();
+    } catch (error) {
+      setDeleteAllError(error instanceof Error ? error.message : "Could not delete all products.");
+    } finally {
+      setDeletingAll(false);
     }
   }
 
@@ -564,6 +592,17 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setDeleteAllError("");
+                setConfirmDeleteAll(true);
+              }}
+              disabled={products.length === 0 || deletingAll}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 size={16} /> Delete all items
+            </button>
             <button
               type="button"
               onClick={openCreate}
@@ -746,7 +785,7 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
                             </button>
                             <button
                               type="button"
-                              onClick={() => void deleteProduct(product)}
+                              onClick={() => setProductToDelete(product)}
                               aria-label={`Delete ${product.name}`}
                               className="grid h-9 w-9 place-items-center rounded-md border border-black/10 bg-white text-[#59636d] transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
                             >
@@ -782,6 +821,131 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
             void saveProduct(value, imageFile, onImageUploaded)
           }
         />
+      )}
+
+      {productToDelete && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#101316]/55 p-4">
+          <section
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-product-title"
+            aria-describedby="delete-product-description"
+            aria-busy={deleting}
+            className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-6 shadow-2xl sm:p-7"
+          >
+            <div className="grid h-12 w-12 place-items-center rounded-xl bg-red-50 text-red-700">
+              <Trash2 size={21} />
+            </div>
+            <h2 id="delete-product-title" className="mt-5 text-xl font-semibold text-[#101316]">
+              Delete this product?
+            </h2>
+            <p id="delete-product-description" className="mt-2 text-sm leading-6 text-[#647079]">
+              Delete <span className="font-semibold text-[#303940]">{productToDelete.name}</span>? This can’t be undone, and the remaining products will be renumbered.
+            </p>
+
+            {pageError && (
+              <p role="alert" className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+                {pageError}
+              </p>
+            )}
+
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => {
+                  setProductToDelete(null);
+                  setPageError("");
+                }}
+                className="min-h-11 rounded-lg border border-black/10 bg-white px-5 text-sm font-medium text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => void deleteProduct()}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-red-700 px-5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-70"
+              >
+                {deleting ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                    />
+                    Deleting…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={15} />
+                    Delete product
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {confirmDeleteAll && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-[#101316]/60 p-4">
+          <section
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-all-title"
+            aria-describedby="delete-all-description"
+            aria-busy={deletingAll}
+            className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-2xl sm:p-7"
+          >
+            <div className="grid h-12 w-12 place-items-center rounded-xl bg-red-50 text-red-700">
+              <Trash2 size={21} />
+            </div>
+            <h2 id="delete-all-title" className="mt-5 text-xl font-semibold text-[#101316]">
+              Delete all auction items?
+            </h2>
+            <p id="delete-all-description" className="mt-2 text-sm leading-6 text-[#647079]">
+              This will permanently delete all <span className="font-semibold text-red-700">{products.length} products</span> from the database and stop the auction. This can’t be undone.
+            </p>
+
+            {deleteAllError && (
+              <p role="alert" className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+                {deleteAllError}
+              </p>
+            )}
+
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                disabled={deletingAll}
+                onClick={() => setConfirmDeleteAll(false)}
+                className="min-h-11 rounded-lg border border-black/10 bg-white px-5 text-sm font-medium text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingAll}
+                onClick={() => void deleteAllProducts()}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-red-700 px-5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-70"
+              >
+                {deletingAll ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                    />
+                    Deleting all…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={15} />
+                    Delete all items
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </main>
   );
