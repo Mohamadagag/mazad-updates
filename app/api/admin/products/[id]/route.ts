@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/app/lib/admin-session";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
 import { mapProductRow } from "@/app/lib/products";
+import { removeProductImages } from "@/app/lib/product-image-storage";
 
 type ProductInput = {
   name: string;
@@ -210,6 +211,17 @@ export async function DELETE(
   try {
     const { id } = await context.params;
     const supabase = getSupabaseAdmin();
+    const { data: product, error: readError } = await supabase
+      .from("products")
+      .select("image")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (readError) throw readError;
+    if (!product) return NextResponse.json({ error: "Product not found." }, { status: 404 });
+
+    await removeProductImages(supabase, [product.image]);
+
     const { data: deleted, error: deleteError } = await supabase
       .from("products")
       .delete()

@@ -1,27 +1,29 @@
 import Image from "next/image";
 import Link from "next/link";
 import type { Product } from "@/app/data/products";
+import { canOptimizeProductImage } from "@/app/lib/product-image";
 
 type ProductCardProps = {
   product: Product;
-  priority?: boolean;
+  preload?: boolean;
 };
 
-export function ProductCard({ product, priority = false }: ProductCardProps) {
+export function ProductCard({ product, preload = false }: ProductCardProps) {
   return (
     <Link
       href={`/item/${product.id}`}
       className="group flex min-h-[430px] flex-col overflow-hidden rounded-lg border border-black/10 bg-white shadow-sm transition hover:-translate-y-1 hover:border-black/20 hover:shadow-xl"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "430px" }}
     >
       <div className="relative m-3 aspect-[4/3] overflow-hidden rounded-md bg-[#eef2f1]">
         <Image
           src={product.image}
           alt={`${product.name} product image`}
           fill
-          unoptimized
+          unoptimized={!canOptimizeProductImage(product.image)}
           sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 25vw"
           className="object-contain transition duration-500 group-hover:scale-105"
-          priority={priority}
+          preload={preload}
         />
       </div>
 

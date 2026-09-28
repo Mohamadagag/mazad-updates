@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/app/lib/admin-session";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
+import { removeProductImages } from "@/app/lib/product-image-storage";
 import { mapProductRow } from "@/app/lib/products";
 
 type ProductInput = {
@@ -239,6 +240,13 @@ export async function DELETE(request: NextRequest) {
 
   try {
     const supabase = getSupabaseAdmin();
+    const { data: products, error: readError } = await supabase
+      .from("products")
+      .select("image");
+
+    if (readError) throw readError;
+    await removeProductImages(supabase, (products ?? []).map((product) => product.image));
+
     const { error: deleteError } = await supabase
       .from("products")
       .delete()

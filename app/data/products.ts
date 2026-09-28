@@ -2100,4 +2100,3 @@ export const products: Product[] = [
     ],
   },
   ];
-export const featuredProduct = products[0]; 

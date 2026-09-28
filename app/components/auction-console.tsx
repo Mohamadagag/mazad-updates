@@ -1,20 +1,96 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
-import type { Product } from "@/app/data/products";
-import { AuctionTimer } from "@/app/components/auction-timer";
+import { useEffect, useState } from "react";
+import type { CatalogProduct } from "@/app/lib/products";
+import { canOptimizeProductImage } from "@/app/lib/product-image";
+import { supabase } from "@/app/lib/supabase";
 
 type AuctionConsoleProps = {
-  products: Product[];
+  products: CatalogProduct[];
+  initialCurrentLot: number;
+  initialAuctionStatus: string;
 };
 
-export function AuctionConsole({ products }: AuctionConsoleProps) {
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [isSold, setIsSold] = useState(false);
-  const [showSoldPopup, setShowSoldPopup] = useState(false);
+export function AuctionConsole({
+  products,
+  initialCurrentLot,
+  initialAuctionStatus,
+}: AuctionConsoleProps) {
+  const [liveProducts, setLiveProducts] = useState(products);
+  const initialIndex = Math.max(
+    0,
+    products.findIndex((product) => product.lot === initialCurrentLot)
+  );
+  const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const [showSoldPopup, setShowSoldPopup] = useState(initialAuctionStatus === "sold");
 
-  if (products.length === 0) {
+  useEffect(() => {
+    const channel = supabase
+      .channel("mazad-live-product-bids")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "products" },
+        (payload) => {
+          const updated = payload.new as {
+            id?: string;
+            lot?: number;
+            current_bid?: number | string;
+            name?: string;
+            image?: string | null;
+          };
+
+          if (typeof updated.id !== "string") return;
+
+          setLiveProducts((currentProducts) => {
+            const index = currentProducts.findIndex((product) => product.id === updated.id);
+            if (index < 0) return currentProducts;
+
+            const existing = currentProducts[index];
+            const product = {
+              ...existing,
+              lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
+              currentBid:
+                updated.current_bid == null
+                  ? existing.currentBid
+                  : String(updated.current_bid),
+              name: updated.name ?? existing.name,
+              image: updated.image ?? existing.image,
+            };
+            const next = [...currentProducts];
+            next[index] = product;
+
+            return product.lot === existing.lot
+              ? next
+              : next.sort((a, b) => a.lot - b.lot);
+          });
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "auction", filter: "id=eq.1" },
+        (payload) => {
+          const updated = payload.new as { current_lot?: number; status?: string };
+          if (typeof updated.current_lot !== "number" || !Number.isInteger(updated.current_lot)) return;
+          setCurrentIndex(Math.max(0, updated.current_lot - 1));
+          setShowSoldPopup(updated.status === "sold");
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showSoldPopup) return;
+
+    const timeout = window.setTimeout(() => setShowSoldPopup(false), 3000);
+    return () => window.clearTimeout(timeout);
+  }, [showSoldPopup]);
+
+  if (liveProducts.length === 0) {
     return (
       <main className="grid min-h-[60vh] place-items-center bg-[#f7f8fb] px-4">
         <p className="rounded-lg border border-black/10 bg-white p-8 text-center text-[#59636d]">
@@ -24,19 +100,7 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
     );
   }
 
-  const product = products[currentIndex];
-
-  const handleSold = () => {
-    setIsSold(true);
-    setShowSoldPopup(true);
-  };
-
-  const goToNextItem = () => {
-    if (!isSold || currentIndex >= products.length - 1) return;
-    setCurrentIndex((index) => index + 1);
-    setIsSold(false);
-    setShowSoldPopup(false);
-  };
+  const product = liveProducts[currentIndex];
 
   return (
     <main className="bg-[#f7f8fb]">
@@ -48,10 +112,10 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
                 src={product.image}
                 alt={`${product.name} product image`}
                 fill
-                unoptimized
+                unoptimized={!canOptimizeProductImage(product.image)}
                 sizes="(max-width: 1024px) 100vw, 55vw"
                 className="object-contain"
-                priority
+                preload
               />
             ) : (
               <div className="grid h-full place-items-center text-sm text-[#76818b]">
@@ -60,11 +124,11 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
             )}
           </div>
 
-          <div className="border-t border-black/10 p-5">
+          {/* <div className="border-t border-black/10 p-5">
             <h1 className="text-3xl font-semibold leading-tight text-[#101316]">
               {product.name}
             </h1>
-          </div>
+          </div> */}
         </div>
 
         <div className="space-y-6">
@@ -73,7 +137,14 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
               <div className="mb-1 flex items-center rounded-md bg-[#f7f8fb] p-4">
                 <p className="mr-4 text-3xl sm:text-5xl">Lot</p>
                 <p className="text-3xl font-semibold text-[#101316] sm:text-5xl">
-                  {currentIndex + 1}
+                  {product.lot}
+                </p>
+              </div>
+
+               <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-[#f7f8fb] p-4">
+                <p className="text-2xl sm:text-4xl">Product Name</p>
+                <p className="break-all text-right text-xl font-semibold text-[#101316] sm:text-3xl">
+                  {product.name || "—"}
                 </p>
               </div>
 
@@ -83,19 +154,11 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
                   ${product.currentBid}
                 </p>
               </div>
+
+             
             </div>
           </section>
 
-          <AuctionTimer key={product.id} onSold={handleSold} />
-
-          <button
-            type="button"
-            onClick={goToNextItem}
-            disabled={!isSold || currentIndex === products.length - 1}
-            className="min-h-16 w-full cursor-pointer rounded-md bg-[#101316] px-4 text-2xl font-semibold text-white transition hover:bg-[#263039] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {currentIndex === products.length - 1 ? "Last Item" : "Next Item"}
-          </button>
         </div>
       </section>
 
@@ -113,13 +176,6 @@ export function AuctionConsole({ products }: AuctionConsoleProps) {
             <p className="mt-3 text-4xl font-semibold text-[#59636d]">
               ${product.currentBid}
             </p>
-            <button
-              type="button"
-              onClick={() => setShowSoldPopup(false)}
-              className="mt-6 min-h-12 w-full cursor-pointer rounded-md bg-[#101316] px-4 text-sm font-semibold text-white hover:bg-[#263039]"
-            >
-              Close
-            </button>
           </div>
         </div>
       )}

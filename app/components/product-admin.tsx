@@ -1,23 +1,34 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   GripVertical,
   LogOut,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   X,
 } from "lucide-react";
 import type { Product } from "@/app/data/products";
 import type { CatalogProduct } from "@/app/lib/products";
+import { canOptimizeProductImage } from "@/app/lib/product-image";
+import { supabase } from "@/app/lib/supabase";
 
 type AdminProduct = Product & { lot: number };
+type StorageUsage = {
+  bucket: string;
+  usedBytes: number;
+  capacityBytes: number | null;
+  remainingBytes: number | null;
+};
 type EditorValue = {
   lot: string;
   name: string;
@@ -84,6 +95,18 @@ async function responseError(response: Response) {
   }
 
   return `The request failed (HTTP ${response.status}). Refresh the page and try again.`;
+}
+
+function formatStorage(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
 }
 
 function ProductEditor({
@@ -349,9 +372,208 @@ function ProductEditor({
   );
 }
 
-export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProduct[] }) {
+function LiveBidPanel({
+  product,
+  currentLot,
+  totalProducts,
+  auctionStatus,
+  auctionBusy,
+  auctionError,
+  focusBidInput,
+  onBidInputFocusChange,
+  onBidSaved,
+  onAuctionAction,
+}: {
+  product: AdminProduct;
+  currentLot: number;
+  totalProducts: number;
+  auctionStatus: string;
+  auctionBusy: boolean;
+  auctionError: string;
+  focusBidInput: boolean;
+  onBidInputFocusChange: (productId: string, focused: boolean) => void;
+  onBidSaved: (id: string, currentBid: string) => void;
+  onAuctionAction: (lot: number, status: "stopped" | "sold") => void;
+}) {
+  const [draftBid, setDraftBid] = useState(product.currentBid);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const bid = Number(draftBid);
+    if (
+      draftBid.trim() === "" ||
+      !Number.isFinite(bid) ||
+      bid < 0 ||
+      bid === Number(product.currentBid)
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(async () => {
+      setSaveStatus("saving");
+      setError("");
+      try {
+        const response = await fetch(
+          `/api/admin/products/${encodeURIComponent(product.id)}/bid`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ current_bid: bid }),
+          }
+        );
+
+        if (!response.ok) throw new Error(await responseError(response));
+
+        const result = (await response.json()) as { current_bid: string };
+        onBidSaved(product.id, result.current_bid);
+        setSaveStatus("saved");
+      } catch (saveError) {
+        setSaveStatus("error");
+        setError(saveError instanceof Error ? saveError.message : "Could not save the bid.");
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timeout);
+  }, [draftBid, onBidSaved, product.currentBid, product.id]);
+
+  return (
+    <section className="mt-7 overflow-hidden rounded-2xl border border-black/10 bg-white shadow-sm">
+      <div className="border-b border-black/[0.06] px-5 py-4 sm:px-7">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#0f766e]">
+          Live auction
+        </p>
+        <h2 className="mt-1 text-lg font-semibold text-[#101316]">
+          Item currently on the screen
+        </h2>
+        <p className="mt-1 text-sm text-[#76818b]">
+          This follows the current lot selected on the public auction screen.
+        </p>
+      </div>
+
+      <div className="grid gap-6 p-5 sm:p-7 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.75fr)] lg:items-center">
+        <div className="flex items-center gap-4 sm:gap-6">
+          <div className="relative grid h-24 w-28 shrink-0 place-items-center overflow-hidden rounded-xl bg-[#eef2f1] sm:h-32 sm:w-40">
+            {product.image ? (
+              <Image
+                src={product.image}
+                alt={`${product.name} product image`}
+                fill
+                unoptimized={!canOptimizeProductImage(product.image)}
+                sizes="160px"
+                className="object-contain p-2"
+              />
+            ) : (
+              <span className="text-xs text-[#8a949c]">No image</span>
+            )}
+          </div>
+          <div className="min-w-0">
+            <span className="inline-flex rounded-md bg-[#101316] px-2.5 py-1 text-xs font-semibold text-white">
+              LOT {currentLot}
+            </span>
+            <h3 className="mt-3 text-xl font-semibold leading-snug text-[#101316] sm:text-2xl">
+              {product.name}
+            </h3>
+            <p className="mt-1 text-sm text-[#76818b]">{product.code || "No product code"}</p>
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-[#f7f8fb] p-5 sm:p-6">
+          <label htmlFor="live-current-bid" className="block text-sm font-semibold text-[#303940]">
+            Current bid ($)
+          </label>
+          <input
+            id="live-current-bid"
+            type="number"
+            min="0"
+            step="0.01"
+            inputMode="decimal"
+            value={draftBid}
+            autoFocus={focusBidInput}
+            onFocus={() => onBidInputFocusChange(product.id, true)}
+            onBlur={() => onBidInputFocusChange(product.id, false)}
+            onChange={(event) => {
+              setDraftBid(event.target.value);
+              setSaveStatus("idle");
+              setError("");
+            }}
+            className="mt-2 h-14 w-full rounded-lg border border-black/10 bg-white px-4 text-2xl font-semibold text-[#101316] outline-none focus:border-[#0f766e] focus:ring-2 focus:ring-[#0f766e]/15"
+          />
+          <div className="mt-3 flex min-h-5 items-center justify-between gap-3 text-xs">
+            <span className="text-[#76818b]">Changes save automatically.</span>
+            <span aria-live="polite" className="font-medium">
+              {saveStatus === "saving" && <span className="text-[#0f766e]">Saving…</span>}
+              {saveStatus === "saved" && <span className="text-[#0f766e]">Live · saved</span>}
+              {saveStatus === "error" && <span className="text-red-700">Not saved</span>}
+            </span>
+          </div>
+          {error && (
+            <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+              {error}
+            </p>
+          )}
+
+          <div className="mt-6 border-t border-black/10 pt-5">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-[#303940]">Auction controls</h3>
+              <span className={`text-xs font-semibold ${auctionStatus === "sold" ? "text-[#0f766e]" : "text-[#76818b]"}`}>
+                {auctionStatus === "sold" ? "Marked SOLD" : "Bidding open"}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                disabled={auctionBusy || currentLot <= 1}
+                onClick={() => onAuctionAction(currentLot - 1, "stopped")}
+                className="inline-flex min-h-11 items-center justify-center gap-1 rounded-lg border border-black/10 bg-white px-2 text-xs font-semibold text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+              >
+                <ArrowLeft size={15} /> Previous
+              </button>
+              <button
+                type="button"
+                disabled={auctionBusy || auctionStatus === "sold"}
+                onClick={() => onAuctionAction(currentLot, "sold")}
+                className="min-h-11 rounded-lg bg-[#0f766e] px-2 text-xs font-semibold text-white hover:bg-[#0d625b] disabled:cursor-not-allowed disabled:opacity-45 sm:text-sm"
+              >
+                {auctionBusy ? "Updating…" : "SOLD"}
+              </button>
+              <button
+                type="button"
+                disabled={auctionBusy || auctionStatus !== "sold" || currentLot >= totalProducts}
+                onClick={() => onAuctionAction(currentLot + 1, "stopped")}
+                className="inline-flex min-h-11 items-center justify-center gap-1 rounded-lg bg-[#101316] px-2 text-xs font-semibold text-white hover:bg-[#263039] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+              >
+                Next <ArrowRight size={15} />
+              </button>
+            </div>
+            {auctionError && (
+              <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                {auctionError}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function ProductAdmin({
+  initialProducts,
+  initialCurrentLot,
+  initialAuctionStatus,
+}: {
+  initialProducts: CatalogProduct[];
+  initialCurrentLot: number;
+  initialAuctionStatus: string;
+}) {
   const router = useRouter();
   const [products, setProducts] = useState<AdminProduct[]>(initialProducts);
+  const [currentLot, setCurrentLot] = useState(initialCurrentLot);
+  const [auctionStatus, setAuctionStatus] = useState(initialAuctionStatus);
+  const [auctionBusy, setAuctionBusy] = useState(false);
+  const [auctionError, setAuctionError] = useState("");
+  const [activeTab, setActiveTab] = useState<"products" | "liveBid">("products");
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [editorProduct, setEditorProduct] = useState<AdminProduct | null>(null);
@@ -365,8 +587,123 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
   const [deleteAllError, setDeleteAllError] = useState("");
   const [editorError, setEditorError] = useState("");
   const [pageError, setPageError] = useState("");
+  const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
+  const [storageLoading, setStorageLoading] = useState(true);
+  const [storageError, setStorageError] = useState("");
+  const [focusedBidProductId, setFocusedBidProductId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [draggedId, setDraggedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("admin-live-auction-state")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "products" },
+        (payload) => {
+          const updated = payload.new as {
+            id?: string;
+            lot?: number;
+            current_bid?: number | string;
+            name?: string;
+            image?: string | null;
+          };
+          if (typeof updated.id !== "string") return;
+
+          setProducts((currentProducts) => {
+            const index = currentProducts.findIndex((product) => product.id === updated.id);
+            if (index < 0) return currentProducts;
+
+            const existing = currentProducts[index];
+            const product = {
+              ...existing,
+              lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
+              currentBid:
+                updated.current_bid == null
+                  ? existing.currentBid
+                  : String(updated.current_bid),
+              name: updated.name ?? existing.name,
+              image: updated.image ?? existing.image,
+            };
+            const next = [...currentProducts];
+            next[index] = product;
+
+            return product.lot === existing.lot
+              ? next
+              : next.sort((a, b) => a.lot - b.lot);
+          });
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "auction", filter: "id=eq.1" },
+        (payload) => {
+          const updated = payload.new as { current_lot?: number; status?: string };
+          if (typeof updated.current_lot === "number") setCurrentLot(updated.current_lot);
+          if (typeof updated.status === "string") setAuctionStatus(updated.status);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const loadStorageUsage = useCallback(async () => {
+    setStorageLoading(true);
+    setStorageError("");
+    try {
+      const response = await fetch("/api/admin/products/storage", { cache: "no-store" });
+      if (response.status === 401) {
+        router.replace("/login?returnTo=%2Fadmin%2Fproducts");
+        return;
+      }
+      if (!response.ok) throw new Error(await responseError(response));
+      setStorageUsage((await response.json()) as StorageUsage);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "Could not load storage usage.");
+    } finally {
+      setStorageLoading(false);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadStorageUsage(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadStorageUsage]);
+
+  const updateLiveBid = useCallback((id: string, currentBid: string) => {
+    setProducts((currentProducts) =>
+      currentProducts.map((product) =>
+        product.id === id ? { ...product, currentBid } : product
+      )
+    );
+  }, []);
+
+  async function updateAuction(lot: number, status: "stopped" | "sold") {
+    if (auctionBusy) return;
+    setAuctionBusy(true);
+    setAuctionError("");
+    try {
+      const response = await fetch("/api/admin/auction", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_lot: lot, status }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const updated = (await response.json()) as { current_lot: number; status: string };
+      setCurrentLot(updated.current_lot);
+      setAuctionStatus(updated.status);
+    } catch (error) {
+      setAuctionError(error instanceof Error ? error.message : "Could not update auction controls.");
+    } finally {
+      setAuctionBusy(false);
+    }
+  }
+
+  const liveProduct = products.find((product) => product.lot === currentLot) ?? products[0];
 
   async function loadProducts() {
     setLoading(true);
@@ -379,6 +716,7 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
       }
       if (!response.ok) throw new Error(await responseError(response));
       setProducts((await response.json()) as AdminProduct[]);
+      void loadStorageUsage();
     } catch (error) {
       setPageError(error instanceof Error ? error.message : "Could not load products.");
     } finally {
@@ -438,6 +776,7 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
         const uploaded = (await uploadResponse.json()) as { url: string };
         image = uploaded.url;
         onImageUploaded(image);
+        void loadStorageUsage();
       }
 
       const body = {
@@ -592,24 +931,28 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setDeleteAllError("");
-                setConfirmDeleteAll(true);
-              }}
-              disabled={products.length === 0 || deletingAll}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Trash2 size={16} /> Delete all items
-            </button>
-            <button
-              type="button"
-              onClick={openCreate}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#0f766e] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0d625b]"
-            >
-              <Plus size={17} /> Add product
-            </button>
+            {activeTab === "products" && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteAllError("");
+                    setConfirmDeleteAll(true);
+                  }}
+                  disabled={products.length === 0 || deletingAll}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Trash2 size={16} /> Delete all items
+                </button>
+                <button
+                  type="button"
+                  onClick={openCreate}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#0f766e] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0d625b]"
+                >
+                  <Plus size={17} /> Add product
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={logout}
@@ -619,6 +962,98 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
             </button>
           </div>
         </div>
+
+        <div role="tablist" aria-label="Admin tools" className="mt-7 flex gap-2 rounded-xl border border-black/10 bg-white p-1.5 shadow-sm sm:w-fit">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "products"}
+            onClick={() => setActiveTab("products")}
+            className={`min-h-10 rounded-lg px-4 text-sm font-semibold transition ${activeTab === "products" ? "bg-[#101316] text-white" : "text-[#59636d] hover:bg-[#f2f4f5]"}`}
+          >
+            Products
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "liveBid"}
+            onClick={() => setActiveTab("liveBid")}
+            className={`min-h-10 rounded-lg px-4 text-sm font-semibold transition ${activeTab === "liveBid" ? "bg-[#101316] text-white" : "text-[#59636d] hover:bg-[#f2f4f5]"}`}
+          >
+            Live bid
+          </button>
+        </div>
+
+        {activeTab === "products" ? (
+          <>
+        <section
+          aria-labelledby="image-storage-title"
+          className="mt-7 rounded-xl border border-black/10 bg-white p-4 shadow-sm sm:p-5"
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <h2 id="image-storage-title" className="text-sm font-semibold text-[#101316]">
+                  Image storage
+                </h2>
+                <span className="text-xs text-[#76818b]">
+                  {storageUsage ? `Bucket: ${storageUsage.bucket}` : "Product image bucket"}
+                </span>
+              </div>
+              {storageLoading && !storageUsage ? (
+                <p className="mt-3 text-sm text-[#76818b]">Checking bucket usage…</p>
+              ) : storageError ? (
+                <p role="alert" className="mt-3 text-sm text-red-700">{storageError}</p>
+              ) : storageUsage ? (
+                <>
+                  {storageUsage.capacityBytes !== null && storageUsage.remainingBytes !== null ? (
+                    <>
+                      <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                        <p className="font-medium text-[#303940]">
+                          {formatStorage(storageUsage.remainingBytes)} remaining
+                        </p>
+                        <p className="text-xs text-[#76818b]">
+                          {formatStorage(storageUsage.usedBytes)} used of {formatStorage(storageUsage.capacityBytes)}
+                        </p>
+                      </div>
+                      <div
+                        role="progressbar"
+                        aria-label="Image bucket storage used"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={Math.min(
+                          100,
+                          Math.round((storageUsage.usedBytes / storageUsage.capacityBytes) * 100)
+                        )}
+                        className="mt-2 h-2.5 overflow-hidden rounded-full bg-[#e8edec]"
+                      >
+                        <div
+                          className={`h-full rounded-full transition-all ${storageUsage.usedBytes >= storageUsage.capacityBytes ? "bg-red-600" : "bg-[#0f766e]"}`}
+                          style={{
+                            width: `${Math.min(100, (storageUsage.usedBytes / storageUsage.capacityBytes) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <p className="mt-3 text-sm text-[#59636d]">
+                      {formatStorage(storageUsage.usedBytes)} used. Set <code className="rounded bg-[#f2f4f5] px-1 py-0.5 text-xs">SUPABASE_PRODUCT_BUCKET_CAPACITY_MB</code> to show remaining capacity.
+                    </p>
+                  )}
+                </>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadStorageUsage()}
+              disabled={storageLoading}
+              className="inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-lg border border-black/10 bg-white px-3 text-xs font-semibold text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-wait disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={storageLoading ? "animate-spin" : ""} />
+              Refresh
+            </button>
+          </div>
+        </section>
 
         <div className="mt-7 grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
@@ -730,7 +1165,7 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
                                   alt=""
                                   fill
                                   sizes="56px"
-                                  unoptimized
+                                  unoptimized={!canOptimizeProductImage(product.image)}
                                   className="object-contain p-1"
                                 />
                               ) : (
@@ -807,6 +1242,34 @@ export function ProductAdmin({ initialProducts }: { initialProducts: CatalogProd
             </p>
           )}
         </div>
+          </>
+        ) : liveProduct ? (
+          <LiveBidPanel
+            key={`${liveProduct.id}-${liveProduct.currentBid}`}
+            product={liveProduct}
+            currentLot={currentLot}
+            totalProducts={products.length}
+            auctionStatus={auctionStatus}
+            auctionBusy={auctionBusy}
+            auctionError={auctionError}
+            focusBidInput={focusedBidProductId === liveProduct.id}
+            onBidInputFocusChange={(productId, focused) => {
+              if (focused) {
+                setFocusedBidProductId(productId);
+              } else {
+                setFocusedBidProductId((current) =>
+                  current === productId ? null : current
+                );
+              }
+            }}
+            onBidSaved={updateLiveBid}
+            onAuctionAction={(lot, status) => void updateAuction(lot, status)}
+          />
+        ) : (
+          <div className="mt-7 rounded-xl border border-black/10 bg-white p-8 text-center text-sm text-[#76818b] shadow-sm">
+            Add a product before using the live bid controls.
+          </div>
+        )}
       </section>
 
       {(creating || editorProduct) && (

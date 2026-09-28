@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useMemo, useState } from "react";
 import type { Product } from "@/app/data/products";
+import { canOptimizeProductImage } from "@/app/lib/product-image";
 
 type ProductCarouselProps = {
   products: Product[];
@@ -47,10 +48,10 @@ export function ProductCarousel({
             src={product.image}
             alt={`${product.name} product image`}
             fill
-            unoptimized
+            unoptimized={!canOptimizeProductImage(product.image)}
             sizes="(max-width: 1024px) 100vw, 58vw"
             className="object-contain"
-            priority
+            preload
           />
         </div>
         <div className="flex flex-col gap-4 border-t border-black/10 p-4 sm:flex-row sm:items-center sm:justify-between">

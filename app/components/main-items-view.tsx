@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { ProductCard } from "@/app/components/product-card";
 import type { Product } from "@/app/data/products";
 
@@ -10,15 +10,18 @@ type MainItemsViewProps = {
 
 export function MainItemsView({ products }: MainItemsViewProps) {
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
 
-  const filteredProducts = products.filter((product) => {
-    const searchTerm = search.toLowerCase().trim();
+  const filteredProducts = useMemo(() => {
+    const searchTerm = deferredSearch.trim().toLowerCase();
+    if (!searchTerm) return products;
 
-    return (
-      product.name.toLowerCase().includes(searchTerm) ||
-      product.code.toLowerCase().includes(searchTerm)
+    return products.filter(
+      (product) =>
+        product.name.toLowerCase().includes(searchTerm) ||
+        product.code.toLowerCase().includes(searchTerm)
     );
-  });
+  }, [deferredSearch, products]);
 
   return (
     <main className="bg-[#f7f8fb]">
@@ -73,7 +76,7 @@ export function MainItemsView({ products }: MainItemsViewProps) {
             <ProductCard
               key={product.id}
               product={product}
-              priority={index < 4}
+              preload={index === 0}
             />
           ))}
         </div>

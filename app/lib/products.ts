@@ -4,6 +4,7 @@ import type { Product } from "@/app/data/products";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
 
 export type CatalogProduct = Product & { lot: number };
+export type AuctionState = { current_lot: number; status: string };
 
 type ProductRow = {
   id: string;
@@ -67,4 +68,19 @@ export async function getProducts() {
   if (error) throw new Error(`Could not load products: ${error.message}`);
 
   return (data as ProductRow[]).map(mapProductRow);
+}
+
+export async function getAuctionState(): Promise<AuctionState> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("auction")
+    .select("current_lot, status")
+    .eq("id", 1)
+    .maybeSingle();
+
+  if (error) throw new Error(`Could not load auction state: ${error.message}`);
+
+  return {
+    current_lot: data?.current_lot ?? 1,
+    status: data?.status ?? "stopped",
+  };
 }
