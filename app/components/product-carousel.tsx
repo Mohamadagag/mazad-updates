@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { Product } from "@/app/data/products";
 import { canOptimizeProductImage } from "@/app/lib/product-image";
 
@@ -14,31 +14,25 @@ export function ProductCarousel({
   products,
   initialProductId,
 }: ProductCarouselProps) {
+  const router = useRouter();
   const initialIndex = products.findIndex(
     (product) => product.id === initialProductId,
   );
-
-  const [activeIndex, setActiveIndex] = useState(
-    initialIndex >= 0 ? initialIndex : 0,
-  );
+  const activeIndex = initialIndex >= 0 ? initialIndex : 0;
 
   const product = products[activeIndex];
 
   const nextProduct = () => {
-    setActiveIndex((index) => (index + 1) % products.length);
+    const nextIndex = (activeIndex + 1) % products.length;
+    router.push(`/item/${products[nextIndex].id}`);
   };
 
   const previousProduct = () => {
-    setActiveIndex(
-      (index) => (index - 1 + products.length) % products.length,
-    );
+    const previousIndex = (activeIndex - 1 + products.length) % products.length;
+    router.push(`/item/${products[previousIndex].id}`);
   };
 
-  const visibleNumber = useMemo(
-    () => String(activeIndex + 1).padStart(2, "0"),
-    [activeIndex],
-  );
-
+  const visibleNumber = String(activeIndex + 1).padStart(2, "0");
 
   return (
     <section className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
@@ -66,8 +60,9 @@ export function ProductCarousel({
               type="button"
               data-testid="previous-product"
               onClick={previousProduct}
+              disabled={activeIndex === 0}
               aria-label="Previous product"
-              className="grid h-11 w-11 place-items-center rounded-md border border-black/15 bg-white text-lg font-semibold text-[#101316] transition hover:bg-[#eef2f1]"
+              className="grid h-11 w-11 place-items-center rounded-md border border-black/15 bg-white text-lg font-semibold text-[#101316] transition enabled:hover:bg-[#eef2f1] disabled:cursor-not-allowed disabled:opacity-40"
             >
               {"<"}
             </button>
@@ -81,8 +76,9 @@ export function ProductCarousel({
               type="button"
               data-testid="next-product"
               onClick={nextProduct}
+              disabled={activeIndex === products.length - 1}
               aria-label="Next product"
-              className="grid h-11 w-11 place-items-center rounded-md border border-black/15 bg-white text-lg font-semibold text-[#101316] transition hover:bg-[#eef2f1]"
+              className="grid h-11 w-11 place-items-center rounded-md border border-black/15 bg-white text-lg font-semibold text-[#101316] transition enabled:hover:bg-[#eef2f1] disabled:cursor-not-allowed disabled:opacity-40"
             >
               {">"}
             </button>

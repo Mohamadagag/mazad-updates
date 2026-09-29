@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Download,
   GripVertical,
   LogOut,
   Pencil,
@@ -107,6 +108,64 @@ function formatStorage(bytes: number) {
     unit += 1;
   }
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function exportProductsAsPdf(products: AdminProduct[]) {
+  const printWindow = window.open("", "_blank", "width=900,height=700");
+  if (!printWindow) {
+    window.alert("Allow pop-ups for this site to export the product list as a PDF.");
+    return;
+  }
+
+  const rows = [...products]
+    .sort((a, b) => a.lot - b.lot)
+    .map(
+      (product) => `
+        <tr>
+          <td>${product.lot}</td>
+          <td>${escapeHtml(product.name)}</td>
+          <td>$${escapeHtml(product.currentBid || "0")}</td>
+        </tr>`
+    )
+    .join("");
+
+  printWindow.document.write(`<!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Auction products</title>
+        <style>
+          @page { size: A4; margin: 16mm; }
+          body { color: #101316; font: 14px Arial, sans-serif; }
+          h1 { margin: 0 0 6px; font-size: 24px; }
+          p { margin: 0 0 20px; color: #59636d; }
+          table { width: 100%; border-collapse: collapse; }
+          th, td { padding: 10px 12px; border: 1px solid #d9dfe2; text-align: left; }
+          th { background: #f2f4f5; font-size: 12px; text-transform: uppercase; }
+          tr { break-inside: avoid; }
+          @media print { thead { display: table-header-group; } }
+        </style>
+      </head>
+      <body>
+        <h1>Auction products</h1>
+        <p>${products.length} products</p>
+        <table>
+          <thead><tr><th>Lot</th><th>Name</th><th>Current bid</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <script>window.onload = () => { window.focus(); window.print(); };</script>
+      </body>
+    </html>`);
+  printWindow.document.close();
 }
 
 function ProductEditor({
@@ -933,6 +992,14 @@ export function ProductAdmin({
           <div className="flex flex-wrap gap-3">
             {activeTab === "products" && (
               <>
+                <button
+                  type="button"
+                  onClick={() => exportProductsAsPdf(products)}
+                  disabled={products.length === 0}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-black/10 bg-white px-4 text-sm font-semibold text-[#303940] shadow-sm transition hover:bg-[#f2f4f5] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Download size={16} /> Export PDF
+                </button>
                 <button
                   type="button"
                   onClick={() => {
