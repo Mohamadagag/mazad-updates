@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/app/lib/admin-session";
+import { publishAuctionEvent } from "@/app/lib/auction-bus";
+import {
+  applySnapshotAuction,
+  readOfflineSnapshot,
+} from "@/app/lib/offline-snapshot";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
 
 export async function PATCH(request: NextRequest) {
@@ -34,6 +39,12 @@ export async function PATCH(request: NextRequest) {
   ) {
     return NextResponse.json({ error: "Invalid auction status." }, { status: 400 });
   }
+
+  // Try Supabase first so the database stays the master copy while online.
+  // A network failure is not fatal: the offline snapshot keeps the live
+  // auction running without an internet connection.
+  let remoteResult: { current_lot: number; status: string } | null = null;
+  let remoteFailed = false;
 
   try {
     const supabase = getSupabaseAdmin();
@@ -73,9 +84,47 @@ export async function PATCH(request: NextRequest) {
       );
 
     if (updateError) throw updateError;
-    return NextResponse.json({ current_lot: currentLot, status });
+    remoteResult = { current_lot: currentLot, status };
   } catch (error) {
-    console.error("Could not update auction lot:", error);
-    return NextResponse.json({ error: "Could not update the current auction lot." }, { status: 500 });
+    remoteFailed = true;
+    console.error("Could not update the auction in Supabase; falling back to the offline snapshot:", error);
   }
+
+  const snapshotRow = await readOfflineSnapshot();
+
+  if (remoteFailed) {
+    if (!snapshotRow) {
+      return NextResponse.json(
+        {
+          error:
+            "No internet connection and no offline snapshot available. Download the offline auction data in the admin console first.",
+        },
+        { status: 503 }
+      );
+    }
+
+    // Fall back to the snapshot values for anything the request omitted.
+    const currentLot = requestedLot ?? snapshotRow.auction.current_lot;
+    const status = requestedStatus ?? snapshotRow.auction.status;
+
+    if (!snapshotRow.products.some((product) => product.lot === currentLot)) {
+      return NextResponse.json({ error: "That lot does not exist." }, { status: 404 });
+    }
+
+    await applySnapshotAuction(currentLot, status);
+    publishAuctionEvent({ kind: "auction", currentLot, status });
+
+    return NextResponse.json({ current_lot: currentLot, status });
+  }
+
+  const currentLot = remoteResult!.current_lot;
+  const status = remoteResult!.status;
+
+  if (snapshotRow) {
+    await applySnapshotAuction(currentLot, status);
+  }
+
+  publishAuctionEvent({ kind: "auction", currentLot, status });
+
+  return NextResponse.json({ current_lot: currentLot, status });
 }

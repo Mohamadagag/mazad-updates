@@ -1,85 +1,91 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CatalogProduct } from "@/app/lib/products";
 import { canOptimizeProductImage } from "@/app/lib/product-image";
-import { supabase } from "@/app/lib/supabase";
 
 type AuctionConsoleProps = {
   products: CatalogProduct[];
   initialCurrentLot: number;
-  initialAuctionStatus: string;
 };
 
-export function AuctionConsole({
-  products,
-  initialCurrentLot,
-  initialAuctionStatus,
-}: AuctionConsoleProps) {
+export function AuctionConsole({ products, initialCurrentLot }: AuctionConsoleProps) {
   const [liveProducts, setLiveProducts] = useState(products);
   const initialIndex = Math.max(
     0,
     products.findIndex((product) => product.lot === initialCurrentLot)
   );
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
-  const [showSoldPopup, setShowSoldPopup] = useState(initialAuctionStatus === "sold");
+  // The SOLD popup is shown only in response to a live "auction" event — that
+  // is, when the admin clicks SOLD — never on page load, even if the last lot
+  // was left in the sold state.
+  const [showSoldPopup, setShowSoldPopup] = useState(false);
+  // Newest bid timestamp per product, used to drop out-of-order SSE events so
+  // a slower older request can never overwrite a newer amount on the display.
+  const lastBidAtRef = useRef(new Map<string, number>());
 
   useEffect(() => {
-    const channel = supabase
-      .channel("mazad-live-product-bids")
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "products" },
-        (payload) => {
-          const updated = payload.new as {
-            id?: string;
-            lot?: number;
-            current_bid?: number | string;
-            name?: string;
-            image?: string | null;
+    const source = new EventSource("/api/auction/stream");
+
+    source.onmessage = (message) => {
+      let event: unknown;
+      try {
+        event = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+
+      if (
+        event &&
+        typeof event === "object" &&
+        "kind" in event &&
+        event.kind === "bid" &&
+        "id" in event &&
+        typeof event.id === "string"
+      ) {
+        const updated = event as {
+          id: string;
+          lot?: number;
+          currentBid?: string;
+          at?: number;
+        };
+
+        const at = typeof updated.at === "number" ? updated.at : 0;
+        const lastAt = lastBidAtRef.current.get(updated.id) ?? 0;
+        if (at && at <= lastAt) return;
+        if (at) lastBidAtRef.current.set(updated.id, at);
+
+        setLiveProducts((currentProducts) => {
+          const index = currentProducts.findIndex((product) => product.id === updated.id);
+          if (index < 0) return currentProducts;
+
+          const existing = currentProducts[index];
+          const product = {
+            ...existing,
+            lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
+            currentBid:
+              updated.currentBid == null ? existing.currentBid : String(updated.currentBid),
           };
+          const next = [...currentProducts];
+          next[index] = product;
 
-          if (typeof updated.id !== "string") return;
+          return product.lot === existing.lot
+            ? next
+            : next.sort((a, b) => a.lot - b.lot);
+        });
+      }
 
-          setLiveProducts((currentProducts) => {
-            const index = currentProducts.findIndex((product) => product.id === updated.id);
-            if (index < 0) return currentProducts;
-
-            const existing = currentProducts[index];
-            const product = {
-              ...existing,
-              lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
-              currentBid:
-                updated.current_bid == null
-                  ? existing.currentBid
-                  : String(updated.current_bid),
-              name: updated.name ?? existing.name,
-              image: updated.image ?? existing.image,
-            };
-            const next = [...currentProducts];
-            next[index] = product;
-
-            return product.lot === existing.lot
-              ? next
-              : next.sort((a, b) => a.lot - b.lot);
-          });
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "auction", filter: "id=eq.1" },
-        (payload) => {
-          const updated = payload.new as { current_lot?: number; status?: string };
-          if (typeof updated.current_lot !== "number" || !Number.isInteger(updated.current_lot)) return;
-          setCurrentIndex(Math.max(0, updated.current_lot - 1));
-          setShowSoldPopup(updated.status === "sold");
-        }
-      )
-      .subscribe();
+      if (event && typeof event === "object" && "kind" in event && event.kind === "auction") {
+        const updated = event as { currentLot?: number; status?: string };
+        if (typeof updated.currentLot !== "number" || !Number.isInteger(updated.currentLot)) return;
+        setCurrentIndex(Math.max(0, updated.currentLot - 1));
+        setShowSoldPopup(updated.status === "sold");
+      }
+    };
 
     return () => {
-      void supabase.removeChannel(channel);
+      source.close();
     };
   }, []);
 
@@ -104,7 +110,7 @@ export function AuctionConsole({
 
   return (
     <main className="bg-[#f7f8fb]">
-      <section className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-10 sm:px-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)] lg:px-8 lg:py-14">
+      <section className="mx-auto grid w-full max-w-[90rem] gap-6 px-4 py-10 sm:px-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)] lg:px-8 lg:py-14">
         <div className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-sm">
           <div className="relative aspect-[4/3] bg-[#eef2f1]">
             {product.image ? (
@@ -123,12 +129,6 @@ export function AuctionConsole({
               </div>
             )}
           </div>
-
-          {/* <div className="border-t border-black/10 p-5">
-            <h1 className="text-3xl font-semibold leading-tight text-[#101316]">
-              {product.name}
-            </h1>
-          </div> */}
         </div>
 
         <div className="space-y-6">
@@ -141,7 +141,7 @@ export function AuctionConsole({
                 </p>
               </div>
 
-               <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-[#f7f8fb] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-[#f7f8fb] p-4">
                 <p className="text-2xl sm:text-4xl">Product Name</p>
                 <p className="break-all text-right text-xl font-semibold text-[#101316] sm:text-3xl">
                   {product.name || "—"}
@@ -154,8 +154,6 @@ export function AuctionConsole({
                   ${product.currentBid}
                 </p>
               </div>
-
-             
             </div>
           </section>
 

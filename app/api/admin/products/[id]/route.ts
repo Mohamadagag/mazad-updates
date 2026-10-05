@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/app/lib/admin-session";
+import { publishAuctionEvent } from "@/app/lib/auction-bus";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
-import { mapProductRow } from "@/app/lib/products";
+import { syncSnapshotProductRows } from "@/app/lib/offline-snapshot";
+import { mapProductRow, rewriteLotOrder, specsWithLot } from "@/app/lib/products";
 import { removeProductImages } from "@/app/lib/product-image-storage";
 
 type ProductInput = {
@@ -73,19 +75,6 @@ function parseProductInput(value: unknown): ProductInput | null {
   };
 }
 
-function specsWithLot(specs: unknown, lot: number) {
-  const otherSpecs = Array.isArray(specs)
-    ? specs.filter(
-        (spec) =>
-          Array.isArray(spec) &&
-          typeof spec[0] === "string" &&
-          typeof spec[1] === "string" &&
-          spec[0].trim().toLowerCase() !== "lot"
-      )
-    : [];
-  return [["Lot", String(lot)], ...otherSpecs];
-}
-
 export async function PATCH(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
@@ -148,6 +137,8 @@ export async function PATCH(
         .single();
 
       if (updateError) throw updateError;
+      await syncSnapshotProductRows([updated as never]);
+      publishAuctionEvent({ kind: "catalog" });
       return NextResponse.json(mapProductRow(updated as never));
     }
 
@@ -172,32 +163,14 @@ export async function PATCH(
       .upsert(updates, { onConflict: "id" });
 
     if (updateError) throw updateError;
+    await syncSnapshotProductRows(updates as never);
+    publishAuctionEvent({ kind: "catalog" });
     const updatedProduct = updates.find((row) => row.id === id);
     return NextResponse.json(mapProductRow(updatedProduct as never));
   } catch (error) {
     console.error("Could not update product:", error);
     return NextResponse.json({ error: "Could not update product." }, { status: 500 });
   }
-}
-
-async function rewriteLotOrder(rows: ProductRow[]) {
-  if (rows.length === 0) return;
-
-  const updatedAt = new Date().toISOString();
-  const orderedRows = [...rows]
-    .sort((a, b) => a.lot - b.lot)
-    .map((row, index) => ({
-      ...row,
-      lot: index + 1,
-      specs: specsWithLot(row.specs, index + 1),
-      updated_at: updatedAt,
-    }));
-
-  const { error } = await getSupabaseAdmin()
-    .from("products")
-    .upsert(orderedRows, { onConflict: "id" });
-
-  if (error) throw error;
 }
 
 export async function DELETE(
@@ -237,7 +210,7 @@ export async function DELETE(
       .order("lot", { ascending: true });
     if (listError) throw listError;
 
-    await rewriteLotOrder((remaining ?? []) as ProductRow[]);
+    const orderedRows = await rewriteLotOrder((remaining ?? []) as ProductRow[]);
 
     const { data: auction, error: auctionReadError } = await supabase
       .from("auction")
@@ -247,7 +220,7 @@ export async function DELETE(
     if (auctionReadError) throw auctionReadError;
 
     if (auction) {
-      const lastLot = remaining?.length ?? 0;
+      const lastLot = orderedRows.length;
       const currentLot = lastLot === 0 ? 1 : Math.min(auction.current_lot, lastLot);
       if (currentLot !== auction.current_lot) {
         const { error: auctionUpdateError } = await supabase
@@ -257,6 +230,9 @@ export async function DELETE(
         if (auctionUpdateError) throw auctionUpdateError;
       }
     }
+
+    await syncSnapshotProductRows(orderedRows, { clampCurrentLot: true });
+    publishAuctionEvent({ kind: "catalog" });
 
     return NextResponse.json({ success: true });
   } catch (error) {

@@ -28,8 +28,6 @@ export function MainItemsView({ products }: MainItemsViewProps) {
       <section className="mx-auto w-full max-w-7xl px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
         <div className="grid gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] lg:items-end">
           <div>
-        
-
             <h1 className="mt-3 max-w-3xl text-4xl font-semibold leading-[1.08] text-[#101316] sm:text-5xl">
               Curated auction lots with fast browsing and clear bidding context.
             </h1>

@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/app/lib/admin-session";
+import { publishAuctionEvent } from "@/app/lib/auction-bus";
 import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
 import { removeProductImages } from "@/app/lib/product-image-storage";
+import {
+  appendSnapshotProduct,
+  loadCatalog,
+  resetSnapshot,
+  syncSnapshotProductRows,
+} from "@/app/lib/offline-snapshot";
 import { mapProductRow } from "@/app/lib/products";
 
 type ProductInput = {
@@ -98,14 +105,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const { data, error } = await getSupabaseAdmin()
-      .from("products")
-      .select("*")
-      .order("lot", { ascending: true });
-
-    if (error) throw error;
-
-    return NextResponse.json((data ?? []).map((row) => mapProductRow(row as never)));
+    // Serves the offline snapshot when one exists so the admin console keeps
+    // working without an internet connection.
+    const { products } = await loadCatalog();
+    return NextResponse.json(products);
   } catch (error) {
     console.error("Could not load admin products:", error);
     return NextResponse.json({ error: "Could not load products." }, { status: 500 });
@@ -152,6 +155,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) throw error;
+    await appendSnapshotProduct(data as never);
+    publishAuctionEvent({ kind: "catalog" });
     return NextResponse.json(mapProductRow(data as never), { status: 201 });
   } catch (error) {
     console.error("Could not add product:", error);
@@ -226,6 +231,8 @@ export async function PATCH(request: NextRequest) {
       .upsert(updates, { onConflict: "id" });
 
     if (updateError) throw updateError;
+    await syncSnapshotProductRows(updates as never);
+    publishAuctionEvent({ kind: "catalog" });
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Could not reorder products:", error);
@@ -259,6 +266,9 @@ export async function DELETE(request: NextRequest) {
       .upsert({ id: 1, current_lot: 1, status: "stopped" }, { onConflict: "id" });
 
     if (auctionError) throw auctionError;
+
+    await resetSnapshot();
+    publishAuctionEvent({ kind: "catalog" });
 
     return NextResponse.json({ success: true });
   } catch (error) {

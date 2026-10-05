@@ -41,3 +41,7 @@ next-dev*.log
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# offline auction snapshot (runtime-generated, machine-local)
+/offline/
+/public/offline/

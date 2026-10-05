@@ -6,7 +6,7 @@ import { getSupabaseAdmin } from "@/app/lib/supabase-admin";
 export type CatalogProduct = Product & { lot: number };
 export type AuctionState = { current_lot: number; status: string };
 
-type ProductRow = {
+export type ProductRow = {
   id: string;
   lot: number;
   name: string;
@@ -83,4 +83,42 @@ export async function getAuctionState(): Promise<AuctionState> {
     current_lot: data?.current_lot ?? 1,
     status: data?.status ?? "stopped",
   };
+}
+
+export function specsWithLot(specs: unknown, lot: number): Array<[string, string]> {
+  const otherSpecs = Array.isArray(specs)
+    ? specs.filter(
+        (spec) =>
+          Array.isArray(spec) &&
+          typeof spec[0] === "string" &&
+          typeof spec[1] === "string" &&
+          spec[0].trim().toLowerCase() !== "lot"
+      )
+    : [];
+  return [["Lot", String(lot)], ...otherSpecs];
+}
+
+// Renumbers the given rows consecutively starting at lot 1, keeps each row's
+// Lot specification in sync, saves the rows, and returns them with their new
+// lot values so callers can mirror the change (for example into the offline
+// snapshot).
+export async function rewriteLotOrder(rows: ProductRow[]): Promise<ProductRow[]> {
+  if (rows.length === 0) return [];
+
+  const updatedAt = new Date().toISOString();
+  const orderedRows = [...rows]
+    .sort((a, b) => a.lot - b.lot)
+    .map((row, index) => ({
+      ...row,
+      lot: index + 1,
+      specs: specsWithLot(row.specs, index + 1),
+      updated_at: updatedAt,
+    }));
+
+  const { error } = await getSupabaseAdmin()
+    .from("products")
+    .upsert(orderedRows, { onConflict: "id" });
+
+  if (error) throw error;
+  return orderedRows;
 }

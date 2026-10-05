@@ -87,7 +87,6 @@ export function ProductCarousel({
       </div>
 
       <aside className="rounded-lg border border-black/10 bg-white p-5 shadow-sm">
-        {/* <p className="text-sm font-semibold uppercase text-[#0f766e]">{product.category}</p> */}
         <h1 className="mt-2 text-3xl font-semibold leading-tight text-[#101316]">{product.name}</h1>
         <p className="mt-4 text-base leading-7 text-[#59636d]">{product.description}</p>
 

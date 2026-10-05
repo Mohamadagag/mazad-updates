@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -21,7 +21,6 @@ import {
 import type { Product } from "@/app/data/products";
 import type { CatalogProduct } from "@/app/lib/products";
 import { canOptimizeProductImage } from "@/app/lib/product-image";
-import { supabase } from "@/app/lib/supabase";
 
 type AdminProduct = Product & { lot: number };
 type StorageUsage = {
@@ -29,6 +28,12 @@ type StorageUsage = {
   usedBytes: number;
   capacityBytes: number | null;
   remainingBytes: number | null;
+};
+type OfflineStatus = {
+  enabled: boolean;
+  bucket: string;
+  generatedAt: string | null;
+  count: number;
 };
 type EditorValue = {
   lot: string;
@@ -458,43 +463,86 @@ function LiveBidPanel({
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    const bid = Number(draftBid);
-    if (
-      draftBid.trim() === "" ||
-      !Number.isFinite(bid) ||
-      bid < 0 ||
-      bid === Number(product.currentBid)
-    ) {
-      return;
-    }
+  // Refs hold the newest values for timers and in-flight requests so fast
+  // typing always wins: saves are serialized one at a time, a save never
+  // clobbers newer keystrokes, and the last write carries the latest draft.
+  const draftRef = useRef(product.currentBid);
+  const lastSavedRef = useRef(product.currentBid);
+  const dirtyRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const inFlightRef = useRef(false);
+  const requeueRef = useRef(false);
 
-    const timeout = window.setTimeout(async () => {
-      setSaveStatus("saving");
-      setError("");
-      try {
-        const response = await fetch(
-          `/api/admin/products/${encodeURIComponent(product.id)}/bid`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ current_bid: bid }),
-          }
-        );
+  const flushSave = useCallback(async () => {
+    const bidText = draftRef.current;
+    const bid = Number(bidText);
 
-        if (!response.ok) throw new Error(await responseError(response));
+    if (bidText.trim() === "" || !Number.isFinite(bid) || bid < 0) return;
+    if (bid === Number(lastSavedRef.current)) return;
 
-        const result = (await response.json()) as { current_bid: string };
-        onBidSaved(product.id, result.current_bid);
-        setSaveStatus("saved");
-      } catch (saveError) {
-        setSaveStatus("error");
-        setError(saveError instanceof Error ? saveError.message : "Could not save the bid.");
+    inFlightRef.current = true;
+    setSaveStatus("saving");
+    setError("");
+    try {
+      const response = await fetch(
+        `/api/admin/products/${encodeURIComponent(product.id)}/bid`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ current_bid: bid }),
+        }
+      );
+
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const result = (await response.json()) as { current_bid: string };
+      lastSavedRef.current = result.current_bid;
+      if (draftRef.current === result.current_bid) dirtyRef.current = false;
+      onBidSaved(product.id, result.current_bid);
+      setSaveStatus("saved");
+    } catch (saveError) {
+      setSaveStatus("error");
+      setError(saveError instanceof Error ? saveError.message : "Could not save the bid.");
+    } finally {
+      inFlightRef.current = false;
+      // The admin typed a new amount while this save was in flight; flush the
+      // newest draft right away instead of leaving it behind.
+      if (requeueRef.current) {
+        requeueRef.current = false;
+        void flushSave();
       }
-    }, 350);
+    }
+  }, [onBidSaved, product.id]);
 
-    return () => window.clearTimeout(timeout);
-  }, [draftBid, onBidSaved, product.currentBid, product.id]);
+  const scheduleSave = useCallback(() => {
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      if (inFlightRef.current) {
+        requeueRef.current = true;
+        return;
+      }
+      void flushSave();
+    }, 300);
+  }, [flushSave]);
+
+  useEffect(
+    () => () => {
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    },
+    []
+  );
+
+  // Follow external bid changes (another admin or the SSE echo) only while the
+  // admin is not mid-edit, so in-progress typing is never overwritten.
+  useEffect(() => {
+    if (!dirtyRef.current && product.currentBid !== draftRef.current) {
+      draftRef.current = product.currentBid;
+      lastSavedRef.current = product.currentBid;
+      setDraftBid(product.currentBid);
+      setSaveStatus("idle");
+    }
+  }, [product.currentBid]);
 
   return (
     <section className="mt-7 overflow-hidden rounded-2xl border border-black/10 bg-white shadow-sm">
@@ -550,11 +598,29 @@ function LiveBidPanel({
             value={draftBid}
             autoFocus={focusBidInput}
             onFocus={() => onBidInputFocusChange(product.id, true)}
-            onBlur={() => onBidInputFocusChange(product.id, false)}
+            onBlur={() => {
+              // Save whatever is drafted immediately instead of waiting out
+              // the debounce, so the display updates as soon as possible.
+              if (saveTimerRef.current !== null) {
+                window.clearTimeout(saveTimerRef.current);
+                saveTimerRef.current = null;
+                if (inFlightRef.current) {
+                  requeueRef.current = true;
+                } else {
+                  void flushSave();
+                }
+              }
+              if (draftRef.current === lastSavedRef.current) dirtyRef.current = false;
+              onBidInputFocusChange(product.id, false);
+            }}
             onChange={(event) => {
-              setDraftBid(event.target.value);
+              const next = event.target.value;
+              draftRef.current = next;
+              dirtyRef.current = true;
+              setDraftBid(next);
               setSaveStatus("idle");
               setError("");
+              scheduleSave();
             }}
             className="mt-2 h-14 w-full rounded-lg border border-black/10 bg-white px-4 text-2xl font-semibold text-[#101316] outline-none focus:border-[#0f766e] focus:ring-2 focus:ring-[#0f766e]/15"
           />
@@ -652,62 +718,14 @@ export function ProductAdmin({
   const [focusedBidProductId, setFocusedBidProductId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [draggedId, setDraggedId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const channel = supabase
-      .channel("admin-live-auction-state")
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "products" },
-        (payload) => {
-          const updated = payload.new as {
-            id?: string;
-            lot?: number;
-            current_bid?: number | string;
-            name?: string;
-            image?: string | null;
-          };
-          if (typeof updated.id !== "string") return;
-
-          setProducts((currentProducts) => {
-            const index = currentProducts.findIndex((product) => product.id === updated.id);
-            if (index < 0) return currentProducts;
-
-            const existing = currentProducts[index];
-            const product = {
-              ...existing,
-              lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
-              currentBid:
-                updated.current_bid == null
-                  ? existing.currentBid
-                  : String(updated.current_bid),
-              name: updated.name ?? existing.name,
-              image: updated.image ?? existing.image,
-            };
-            const next = [...currentProducts];
-            next[index] = product;
-
-            return product.lot === existing.lot
-              ? next
-              : next.sort((a, b) => a.lot - b.lot);
-          });
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "auction", filter: "id=eq.1" },
-        (payload) => {
-          const updated = payload.new as { current_lot?: number; status?: string };
-          if (typeof updated.current_lot === "number") setCurrentLot(updated.current_lot);
-          if (typeof updated.status === "string") setAuctionStatus(updated.status);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, []);
+  const [offlineStatus, setOfflineStatus] = useState<OfflineStatus | null>(null);
+  const [offlineBusy, setOfflineBusy] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState("");
+  // Newest bid timestamp per product, used to drop out-of-order SSE events.
+  const lastBidAtRef = useRef(new Map<string, number>());
 
   const loadStorageUsage = useCallback(async () => {
     setStorageLoading(true);
@@ -731,6 +749,81 @@ export function ProductAdmin({
     const timer = window.setTimeout(() => void loadStorageUsage(), 0);
     return () => window.clearTimeout(timer);
   }, [loadStorageUsage]);
+
+  const loadOfflineStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/admin/offline", { cache: "no-store" });
+      if (response.status === 401) {
+        router.replace("/login?returnTo=%2Fadmin%2Fproducts");
+        return;
+      }
+      if (!response.ok) throw new Error(await responseError(response));
+      setOfflineStatus((await response.json()) as OfflineStatus);
+    } catch {
+      // The offline card just stays unknown when the status cannot load.
+      setOfflineStatus(null);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadOfflineStatus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadOfflineStatus]);
+
+  async function downloadOfflineData() {
+    if (offlineBusy) return;
+    setOfflineBusy(true);
+    setPageError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/admin/offline", { method: "POST" });
+      if (response.status === 401) {
+        router.replace("/login?returnTo=%2Fadmin%2Fproducts");
+        return;
+      }
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const result = (await response.json()) as {
+        count: number;
+        warnings?: string[];
+      };
+      setNotice(
+        `Offline auction data is ready: ${result.count} items with images stored on the server. /mazad and Live bid now work without Supabase.` +
+          (result.warnings && result.warnings.length > 0
+            ? ` Warnings: ${result.warnings.join(" ")}`
+            : "")
+      );
+      await loadOfflineStatus();
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "Could not download the offline data.");
+    } finally {
+      setOfflineBusy(false);
+    }
+  }
+
+  async function removeOfflineData() {
+    if (offlineBusy) return;
+    setOfflineBusy(true);
+    setPageError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/admin/offline", { method: "DELETE" });
+      if (response.status === 401) {
+        router.replace("/login?returnTo=%2Fadmin%2Fproducts");
+        return;
+      }
+      if (!response.ok) throw new Error(await responseError(response));
+
+      setNotice("Offline mode is off. The live auction reads from Supabase again.");
+      await loadOfflineStatus();
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "Could not remove the offline data.");
+    } finally {
+      setOfflineBusy(false);
+    }
+  }
 
   const updateLiveBid = useCallback((id: string, currentBid: string) => {
     setProducts((currentProducts) =>
@@ -764,7 +857,7 @@ export function ProductAdmin({
 
   const liveProduct = products.find((product) => product.lot === currentLot) ?? products[0];
 
-  async function loadProducts() {
+  const loadProducts = useCallback(async () => {
     setLoading(true);
     setPageError("");
     try {
@@ -774,14 +867,80 @@ export function ProductAdmin({
         return;
       }
       if (!response.ok) throw new Error(await responseError(response));
-      setProducts((await response.json()) as AdminProduct[]);
+      const fetched = (await response.json()) as AdminProduct[];
+      setProducts(fetched);
+      setSelectedIds((current) => {
+        const next = new Set([...current].filter((id) =>
+          fetched.some((product) => product.id === id)
+        ));
+        return next.size === current.size ? current : next;
+      });
       void loadStorageUsage();
     } catch (error) {
       setPageError(error instanceof Error ? error.message : "Could not load products.");
     } finally {
       setLoading(false);
     }
-  }
+  }, [loadStorageUsage, router]);
+
+  useEffect(() => {
+    const source = new EventSource("/api/auction/stream");
+
+    source.onmessage = (message) => {
+      let event: unknown;
+      try {
+        event = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+
+      if (event && typeof event === "object" && "kind" in event) {
+        if (event.kind === "bid" && "id" in event && typeof event.id === "string") {
+          const updated = event as { id: string; lot?: number; currentBid?: string; at?: number };
+
+          // Drop out-of-order bid events so an older save can never overwrite
+          // a newer amount in the admin list either.
+          const at = typeof updated.at === "number" ? updated.at : 0;
+          const lastAt = lastBidAtRef.current.get(updated.id) ?? 0;
+          if (at && at <= lastAt) return;
+          if (at) lastBidAtRef.current.set(updated.id, at);
+
+          setProducts((currentProducts) => {
+            const index = currentProducts.findIndex((product) => product.id === updated.id);
+            if (index < 0) return currentProducts;
+
+            const existing = currentProducts[index];
+            const product = {
+              ...existing,
+              lot: typeof updated.lot === "number" ? updated.lot : existing.lot,
+              currentBid:
+                updated.currentBid == null ? existing.currentBid : String(updated.currentBid),
+            };
+            const next = [...currentProducts];
+            next[index] = product;
+
+            return product.lot === existing.lot
+              ? next
+              : next.sort((a, b) => a.lot - b.lot);
+          });
+        }
+
+        if (event.kind === "auction") {
+          const updated = event as { currentLot?: number; status?: string };
+          if (typeof updated.currentLot === "number") setCurrentLot(updated.currentLot);
+          if (typeof updated.status === "string") setAuctionStatus(updated.status);
+        }
+
+        if (event.kind === "catalog") {
+          void loadProducts();
+        }
+      }
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [loadProducts]);
 
   const visibleProducts = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -793,6 +952,76 @@ export function ProductAdmin({
         String(product.lot).includes(term)
     );
   }, [products, query]);
+
+  const selectedCount = selectedIds.size;
+  const allVisibleSelected =
+    visibleProducts.length > 0 && visibleProducts.every((product) => selectedIds.has(product.id));
+  const someVisibleSelected = visibleProducts.some((product) => selectedIds.has(product.id));
+
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
+    }
+  });
+
+  function toggleSelected(id: string, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        visibleProducts.forEach((product) => next.delete(product.id));
+      } else {
+        visibleProducts.forEach((product) => next.add(product.id));
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedProducts() {
+    if (deletingSelected || selectedCount === 0) return;
+    setDeletingSelected(true);
+    setBulkDeleteError("");
+    setPageError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/admin/products/bulk", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [...selectedIds] }),
+      });
+      if (response.status === 401) {
+        router.replace("/login?returnTo=%2Fadmin%2Fproducts");
+        return;
+      }
+      if (!response.ok) throw new Error(await responseError(response));
+
+      const result = (await response.json()) as { deleted: number };
+      setConfirmBulkDelete(false);
+      setSelectedIds(new Set());
+      setNotice(
+        `${result.deleted} ${result.deleted === 1 ? "product was" : "products were"} deleted. Remaining lots were renumbered.`
+      );
+      await loadProducts();
+    } catch (error) {
+      setBulkDeleteError(error instanceof Error ? error.message : "Could not delete the selected products.");
+    } finally {
+      setDeletingSelected(false);
+    }
+  }
 
   function openCreate() {
     setEditorProduct(null);
@@ -1003,6 +1232,17 @@ export function ProductAdmin({
                 <button
                   type="button"
                   onClick={() => {
+                    setBulkDeleteError("");
+                    setConfirmBulkDelete(true);
+                  }}
+                  disabled={selectedCount === 0 || deletingSelected || savingOrder}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 shadow-sm transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Trash2 size={16} /> Delete selected ({selectedCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     setDeleteAllError("");
                     setConfirmDeleteAll(true);
                   }}
@@ -1122,6 +1362,68 @@ export function ProductAdmin({
           </div>
         </section>
 
+        <section
+          aria-labelledby="offline-data-title"
+          className="mt-7 rounded-xl border border-black/10 bg-white p-4 shadow-sm sm:p-5"
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 flex-1">
+              <h2 id="offline-data-title" className="text-sm font-semibold text-[#101316]">
+                Offline auction data
+              </h2>
+              <p className="mt-1 text-xs text-[#76818b]">
+                Downloads every item and its image from Supabase onto this server. /mazad and Live bid
+                then run from the local copy, so bid changes are instant and no internet is needed
+                during the auction.
+              </p>
+
+              {offlineStatus === null ? (
+                <p className="mt-3 text-sm text-[#76818b]">Checking offline data…</p>
+              ) : offlineBusy ? (
+                <p className="mt-3 inline-flex items-center gap-2 text-sm text-[#0f766e]">
+                  <RefreshCw size={14} className="animate-spin" />
+                  Preparing offline data…
+                </p>
+              ) : offlineStatus.enabled ? (
+                <p className="mt-3 text-sm text-[#0d625b]">
+                  <span className="font-semibold">Ready.</span>{" "}
+                  {offlineStatus.count} items stored on this server, generated{" "}
+                  {offlineStatus.generatedAt
+                    ? new Date(offlineStatus.generatedAt).toLocaleString()
+                    : "—"}
+                  . Regenerate after changing the catalog so the copy stays current.
+                </p>
+              ) : (
+                <p className="mt-3 text-sm text-[#59636d]">
+                  Not downloaded yet. Without it, the live auction needs an internet connection.
+                </p>
+              )}
+            </div>
+
+            <div className="flex shrink-0 flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void downloadOfflineData()}
+                disabled={offlineBusy}
+                className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg bg-[#0f766e] px-3 text-xs font-semibold text-white hover:bg-[#0d625b] disabled:cursor-wait disabled:opacity-50"
+              >
+                <Download size={14} />
+                {offlineStatus?.enabled ? "Update offline data" : "Download offline data"}
+              </button>
+              {offlineStatus?.enabled && (
+                <button
+                  type="button"
+                  onClick={() => void removeOfflineData()}
+                  disabled={offlineBusy}
+                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-black/10 bg-white px-3 text-xs font-semibold text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-wait disabled:opacity-50"
+                >
+                  <X size={14} /> Turn off
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
+
         <div className="mt-7 grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
             <p className="text-xs font-medium uppercase tracking-wide text-[#76818b]">Products</p>
@@ -1175,6 +1477,17 @@ export function ProductAdmin({
             <table className="w-full min-w-[760px] border-collapse text-left">
               <thead>
                 <tr className="border-b border-black/10 bg-[#fbfcfd] text-[11px] font-semibold uppercase tracking-[0.12em] text-[#76818b]">
+                  <th className="w-10 px-4 py-3">
+                    <input
+                      ref={selectAllRef}
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectAll}
+                      disabled={loading || visibleProducts.length === 0}
+                      aria-label="Select all visible products"
+                      className="h-4 w-4 cursor-pointer accent-[#0f766e]"
+                    />
+                  </th>
                   <th className="w-24 px-4 py-3">Lot</th>
                   <th className="px-4 py-3">Product</th>
                   <th className="w-32 px-4 py-3">Current bid</th>
@@ -1185,13 +1498,13 @@ export function ProductAdmin({
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={5} className="px-5 py-16 text-center text-sm text-[#76818b]">
+                    <td colSpan={6} className="px-5 py-16 text-center text-sm text-[#76818b]">
                       Loading products…
                     </td>
                   </tr>
                 ) : visibleProducts.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-5 py-16 text-center text-sm text-[#76818b]">
+                    <td colSpan={6} className="px-5 py-16 text-center text-sm text-[#76818b]">
                       {products.length ? "No products match your search." : "No products yet. Add your first product to get started."}
                     </td>
                   </tr>
@@ -1216,8 +1529,18 @@ export function ProductAdmin({
                           dropOnProduct(product.id);
                         }}
                         onDragEnd={() => setDraggedId(null)}
-                        className={`border-b border-black/[0.06] last:border-0 hover:bg-[#fbfcfd] ${draggedId === product.id ? "opacity-40" : ""}`}
+                        className={`border-b border-black/[0.06] last:border-0 hover:bg-[#fbfcfd] ${selectedIds.has(product.id) ? "bg-[#0f766e]/[0.04]" : ""} ${draggedId === product.id ? "opacity-40" : ""}`}
                       >
+                        <td className="px-4 py-3.5 align-middle">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(product.id)}
+                            onChange={(event) => toggleSelected(product.id, event.target.checked)}
+                            disabled={deletingSelected || loading}
+                            aria-label={`Select ${product.name}`}
+                            className="h-4 w-4 cursor-pointer accent-[#0f766e]"
+                          />
+                        </td>
                         <td className="px-4 py-3.5 align-middle">
                           <span className="inline-flex min-w-12 items-center justify-center rounded-md bg-[#101316] px-2 py-1.5 text-sm font-semibold text-white">
                             {product.lot}
@@ -1312,7 +1635,10 @@ export function ProductAdmin({
           </>
         ) : liveProduct ? (
           <LiveBidPanel
-            key={`${liveProduct.id}-${liveProduct.currentBid}`}
+            // Remount only when the lot changes, not when the bid changes;
+            // remounting on every bid reset the draft mid-typing and turned
+            // quick edits into values like "10" or "1090".
+            key={liveProduct.id}
             product={liveProduct}
             currentLot={currentLot}
             totalProducts={products.length}
@@ -1409,6 +1735,71 @@ export function ProductAdmin({
                   <>
                     <Trash2 size={15} />
                     Delete product
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {confirmBulkDelete && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-[#101316]/60 p-4">
+          <section
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-selected-title"
+            aria-describedby="delete-selected-description"
+            aria-busy={deletingSelected}
+            className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-2xl sm:p-7"
+          >
+            <div className="grid h-12 w-12 place-items-center rounded-xl bg-red-50 text-red-700">
+              <Trash2 size={21} />
+            </div>
+            <h2 id="delete-selected-title" className="mt-5 text-xl font-semibold text-[#101316]">
+              Delete selected products?
+            </h2>
+            <p id="delete-selected-description" className="mt-2 text-sm leading-6 text-[#647079]">
+              This will permanently delete{" "}
+              <span className="font-semibold text-red-700">
+                {selectedCount} {selectedCount === 1 ? "product" : "products"}
+              </span>{" "}
+              with their uploaded images, and renumber the remaining lots. This can’t be undone.
+            </p>
+
+            {bulkDeleteError && (
+              <p role="alert" className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+                {bulkDeleteError}
+              </p>
+            )}
+
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                disabled={deletingSelected}
+                onClick={() => setConfirmBulkDelete(false)}
+                className="min-h-11 rounded-lg border border-black/10 bg-white px-5 text-sm font-medium text-[#303940] hover:bg-[#f2f4f5] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingSelected}
+                onClick={() => void deleteSelectedProducts()}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-red-700 px-5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-70"
+              >
+                {deletingSelected ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                    />
+                    Deleting…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={15} />
+                    Delete {selectedCount === 1 ? "product" : `${selectedCount} products`}
                   </>
                 )}
               </button>

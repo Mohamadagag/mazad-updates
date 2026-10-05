@@ -1,8 +1,11 @@
+import type { Metadata } from "next";
+import { cache } from "react";
 import { connection } from "next/server";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ProductCarousel } from "@/app/components/product-carousel";
-import { getProducts } from "@/app/lib/products";
+import { loadCatalog } from "@/app/lib/offline-snapshot";
+import { siteDescription, siteName } from "@/app/lib/site";
 
 type ItemPageProps = {
   params: Promise<{
@@ -10,10 +13,51 @@ type ItemPageProps = {
   }>;
 };
 
+// One catalog load per request is shared between generateMetadata and the page.
+const loadCatalogPerRequest = cache(loadCatalog);
+
+export async function generateMetadata({
+  params,
+}: ItemPageProps): Promise<Metadata> {
+  const { id } = await params;
+
+  try {
+    const { products } = await loadCatalogPerRequest();
+    const product = products.find((entry) => entry.id === id);
+    if (!product) return { title: "Item not found", robots: { index: false } };
+
+    const title = `${product.name} — Lot ${product.lot}`;
+    const description =
+      product.description ||
+      (product.code
+        ? `Product code ${product.code}. ${siteDescription}`
+        : `Auction lot ${product.lot} at ${siteName}. ${siteDescription}`);
+
+    return {
+      title,
+      description,
+      alternates: { canonical: `/item/${product.id}` },
+      openGraph: {
+        title,
+        description,
+        url: `/item/${product.id}`,
+        images: product.image ? [product.image] : undefined,
+      },
+      twitter: {
+        title,
+        description,
+        images: product.image ? [product.image] : undefined,
+      },
+    };
+  } catch {
+    return { title: "Auction item", robots: { index: false } };
+  }
+}
+
 export default async function ItemPage({ params }: ItemPageProps) {
   await connection();
   const { id } = await params;
-  const products = await getProducts();
+  const { products } = await loadCatalogPerRequest();
 
   const product = products.find((product) => product.id === id);
 

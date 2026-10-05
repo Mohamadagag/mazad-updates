@@ -5,7 +5,7 @@ import {
   ADMIN_SESSION_COOKIE,
   verifyAdminSession,
 } from "@/app/lib/admin-session";
-import { getAuctionState, getProducts } from "@/app/lib/products";
+import { loadCatalog } from "@/app/lib/offline-snapshot";
 
 export default async function AdminProductsPage() {
   const cookieStore = await cookies();
@@ -13,7 +13,7 @@ export default async function AdminProductsPage() {
     redirect("/login?returnTo=%2Fadmin%2Fproducts");
   }
 
-  const [products, auction] = await Promise.all([getProducts(), getAuctionState()]);
+  const { products, auction } = await loadCatalog();
   return (
     <ProductAdmin
       initialProducts={products}

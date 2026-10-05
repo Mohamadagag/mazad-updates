@@ -43,15 +43,6 @@ export function ProductCard({ product, preload = false }: ProductCardProps) {
         <p className="line-clamp-3 text-sm leading-6 text-[#59636d]">
           {product.description}
         </p>
-
-        {/* <div className="mt-auto grid grid-cols-2 gap-3 border-t border-black/10 pt-4 text-sm">
-          <div>
-            <p className="text-xs text-[#76818b]">Current bid</p>
-            <p className="font-semibold text-[#101316]">
-              {product.currentBid}
-            </p>
-          </div>
-        </div> */}
       </div>
     </Link>
   );
