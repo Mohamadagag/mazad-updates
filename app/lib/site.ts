@@ -1,7 +1,7 @@
 // Shared SEO/site configuration used by metadata, sitemap, and robots files.
 export const siteName = "Mazad Yaghi";
 export const siteNameArabic = "مزاد ياغي";
-export const siteTitle = `${siteName} (${siteNameArabic})`;
+export const siteTitle = `${siteName} (${siteNameArabic}) — Auction Lots & Terms`;
 export const siteDescription =
   "Auctions by Mazad Yaghi (مزاد ياغي). Browse auction lots with item details and specifications, and read the auction terms and conditions.";
 

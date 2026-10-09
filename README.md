@@ -1,4 +1,4 @@
-# Mazad Yaghi Auctions
+# Mazad Yaghi
 
 Mazad Yaghi is a product-catalog and live auction control application built with Next.js 16, React 19, and Supabase. Visitors can browse auction lots and read the auction terms. Signed-in administrators manage the catalog and control the live auction display.
 

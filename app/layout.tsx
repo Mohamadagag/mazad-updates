@@ -22,6 +22,15 @@ const organizationJsonLd = {
   description: siteDescription,
 };
 
+const websiteJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  name: siteName,
+  alternateName: siteNameArabic,
+  url: siteUrl,
+  description: siteDescription,
+};
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
@@ -41,11 +50,13 @@ export const metadata: Metadata = {
     url: "/",
     locale: "en_US",
     alternateLocale: "ar",
+    images: ["/og-default.png"],
   },
   twitter: {
     card: "summary_large_image",
     title: siteTitle,
     description: siteDescription,
+    images: ["/og-default.png"],
   },
   robots: {
     index: true,
@@ -66,6 +77,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationJsonLd) }}
+        />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(websiteJsonLd) }}
         />
       </body>
     </html>

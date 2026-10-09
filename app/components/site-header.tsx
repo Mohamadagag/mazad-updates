@@ -9,8 +9,11 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-50 border-b border-black/10 bg-[#f7f8fb]/90 backdrop-blur">
       <div className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between gap-4 px-2 sm:px-6 lg:px-8">
-        <Link href="/" className="font-semibold text-[#101316]">
-          Yaghi Store Auctions
+        <Link
+          href="/"
+          className="flex items-baseline gap-2 font-semibold text-[#101316]"
+        >
+          Mazad Yaghi
         </Link>
         <nav className="flex items-center gap-1 rounded-lg border border-black/10 bg-white p-1 shadow-sm">
           {navItems.map((item) => (

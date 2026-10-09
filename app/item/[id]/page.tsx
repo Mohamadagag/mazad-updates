@@ -41,12 +41,12 @@ export async function generateMetadata({
         title,
         description,
         url: `/item/${product.id}`,
-        images: product.image ? [product.image] : undefined,
+        images: [product.image || "/og-default.png"],
       },
       twitter: {
         title,
         description,
-        images: product.image ? [product.image] : undefined,
+        images: [product.image || "/og-default.png"],
       },
     };
   } catch {
